@@ -2,18 +2,19 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
+const os = require("os");
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
-const TEMP = path.join(__dirname, "temp");
+// Vercel: único diretório gravável
+const TEMP = path.join(os.tmpdir(), "photo-fastcep");
 
-if (!fs.existsSync(TEMP)) {
-  fs.mkdirSync(TEMP);
-}
-
-app.use("/photos", express.static(TEMP));
-
+try {
+  if (!fs.existsSync(TEMP)) {
+    fs.mkdirSync(TEMP, { recursive: true });
+  }
+} catch {}
 
 // ===============================
 // UTILIDADES
@@ -27,13 +28,11 @@ function id() {
   return crypto.randomBytes(8).toString("hex");
 }
 
-
 // ===============================
 // VIACEP
 // ===============================
 
 async function viaCEP(cep) {
-
   const response = await fetch(
     `https://viacep.com.br/ws/${cep}/json/`
   );
@@ -51,13 +50,11 @@ async function viaCEP(cep) {
   return data;
 }
 
-
 // ===============================
 // GEOCODIFICAÇÃO
 // ===============================
 
 async function geocode(address) {
-
   const url =
     "https://nominatim.openstreetmap.org/search?" +
     new URLSearchParams({
@@ -73,15 +70,11 @@ async function geocode(address) {
     }
   });
 
-  if (!response.ok) {
-    return null;
-  }
+  if (!response.ok) return null;
 
   const data = await response.json();
 
-  if (!data.length) {
-    return null;
-  }
+  if (!data.length) return null;
 
   return {
     latitude: Number(data[0].lat),
@@ -89,13 +82,11 @@ async function geocode(address) {
   };
 }
 
-
 // ===============================
 // WIKIMEDIA COMMONS
 // ===============================
 
 async function searchImages(lat, lon) {
-
   const url =
     "https://commons.wikimedia.org/w/api.php?" +
     new URLSearchParams({
@@ -115,26 +106,17 @@ async function searchImages(lat, lon) {
 
   const response = await fetch(url);
 
-  if (!response.ok) {
-    return [];
-  }
+  if (!response.ok) return [];
 
   const data = await response.json();
 
-  const pages = Object.values(
-    data.query?.pages || {}
-  );
+  const pages = Object.values(data.query?.pages || {});
 
   return pages
     .map(page => {
-
       const info = page.imageinfo?.[0];
-
       if (!info) return null;
-
-      if (!info.mime?.startsWith("image/")) {
-        return null;
-      }
+      if (!info.mime?.startsWith("image/")) return null;
 
       return {
         title: page.title,
@@ -143,98 +125,91 @@ async function searchImages(lat, lon) {
         width: info.width,
         height: info.height
       };
-
     })
     .filter(Boolean);
 }
-
 
 // ===============================
 // DOWNLOAD TEMPORÁRIO
 // ===============================
 
 async function downloadImage(url) {
-
   try {
-
     const response = await fetch(url);
+    if (!response.ok) return null;
 
-    if (!response.ok) {
-      return null;
-    }
+    const type = response.headers.get("content-type") || "";
+    if (!type.startsWith("image/")) return null;
 
-    const type =
-      response.headers.get("content-type") || "";
+    const buffer = Buffer.from(await response.arrayBuffer());
 
-    if (!type.startsWith("image/")) {
-      return null;
-    }
+    const extension = type.includes("png")
+      ? ".png"
+      : type.includes("webp")
+        ? ".webp"
+        : ".jpg";
 
-    const buffer =
-      Buffer.from(await response.arrayBuffer());
-
-    const extension =
-      type.includes("png")
-        ? ".png"
-        : type.includes("webp")
-          ? ".webp"
-          : ".jpg";
-
-    const filename =
-      id() + extension;
-
-    const filepath =
-      path.join(TEMP, filename);
+    const filename = id() + extension;
+    const filepath = path.join(TEMP, filename);
 
     fs.writeFileSync(filepath, buffer);
 
     return filename;
-
   } catch {
-
     return null;
   }
 }
 
-
 // ===============================
-// LIMPEZA
+// LIMPEZA (lazy - roda a cada request)
 // ===============================
 
 function cleanup() {
-
   const now = Date.now();
 
-  for (const file of fs.readdirSync(TEMP)) {
+  try {
+    for (const file of fs.readdirSync(TEMP)) {
+      const filepath = path.join(TEMP, file);
 
-    const filepath =
-      path.join(TEMP, file);
-
-    try {
-
-      const stat =
-        fs.statSync(filepath);
-
-      // 15 minutos
-      if (
-        now - stat.mtimeMs >
-        15 * 60 * 1000
-      ) {
-        fs.unlinkSync(filepath);
-      }
-
-    } catch {}
-  }
+      try {
+        const stat = fs.statSync(filepath);
+        // 15 minutos
+        if (now - stat.mtimeMs > 15 * 60 * 1000) {
+          fs.unlinkSync(filepath);
+        }
+      } catch {}
+    }
+  } catch {}
 }
 
-setInterval(cleanup, 60 * 1000);
+// ===============================
+// SERVE IMAGEM DE /tmp
+// ===============================
 
+app.get("/photos/:file", (req, res) => {
+  const file = req.params.file;
+
+  // Sanitização básica contra path traversal
+  if (!/^[a-f0-9]+\.(jpg|png|webp)$/i.test(file)) {
+    return res.status(400).end();
+  }
+
+  const filepath = path.join(TEMP, file);
+
+  if (!fs.existsSync(filepath)) {
+    return res.status(404).end();
+  }
+
+  res.setHeader("Cache-Control", "public, max-age=900");
+  res.sendFile(filepath);
+});
 
 // ===============================
 // HOME
 // ===============================
 
 app.get("/", (req, res) => {
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
 
   res.send(`
 <!DOCTYPE html>
@@ -314,18 +289,11 @@ button {
 
 <h1>photo-fastcep</h1>
 
-<p>
-Consulte imagens por CEP.
-</p>
+<p>Consulte imagens por CEP.</p>
 
-<input
-  id="cep"
-  placeholder="Ex: 01001-000"
-/>
+<input id="cep" placeholder="Ex: 01001-000" />
 
-<button onclick="buscar()">
-Pesquisar
-</button>
+<button onclick="buscar()">Pesquisar</button>
 
 <div id="status"></div>
 
@@ -337,68 +305,41 @@ Pesquisar
 
 async function buscar() {
 
-  const cep =
-    document.getElementById("cep").value;
-
-  const status =
-    document.getElementById("status");
-
-  const gallery =
-    document.getElementById("gallery");
+  const cep = document.getElementById("cep").value;
+  const status = document.getElementById("status");
+  const gallery = document.getElementById("gallery");
 
   gallery.innerHTML = "";
-
-  status.innerText =
-    "Buscando localização e imagens...";
+  status.innerText = "Buscando localização e imagens...";
 
   try {
 
-    const response =
-      await fetch("/api/photos/" + cep);
-
-    const data =
-      await response.json();
+    const response = await fetch("/api/photos/" + cep);
+    const data = await response.json();
 
     if (!response.ok) {
-      throw new Error(
-        data.message || "Erro"
-      );
+      throw new Error(data.message || "Erro");
     }
 
     status.innerHTML =
-      "<p>" +
-      data.endereco.completo +
-      "</p>" +
-      "<p>" +
-      data.imagens.length +
-      " imagens encontradas</p>";
+      "<p>" + data.endereco.completo + "</p>" +
+      "<p>" + data.imagens.length + " imagens encontradas</p>";
 
     for (const image of data.imagens) {
 
-      const card =
-        document.createElement("div");
-
+      const card = document.createElement("div");
       card.className = "card";
 
       card.innerHTML = \`
-        <img
-          src="\${image.url}"
-          loading="lazy"
-        />
-
-        <div class="info">
-          \${image.titulo || ""}
-        </div>
+        <img src="\${image.url}" loading="lazy" />
+        <div class="info">\${image.titulo || ""}</div>
       \`;
 
       gallery.appendChild(card);
     }
 
   } catch (error) {
-
-    status.innerText =
-      error.message;
-
+    status.innerText = error.message;
   }
 
 }
@@ -410,30 +351,25 @@ async function buscar() {
 `);
 });
 
-
 // ===============================
 // API PRINCIPAL
 // ===============================
 
 app.get("/api/photos/:cep", async (req, res) => {
-
   try {
+    cleanup();
 
-    const cep =
-      cleanCEP(req.params.cep);
+    const cep = cleanCEP(req.params.cep);
 
     if (cep.length !== 8) {
-
       return res.status(400).json({
         success: false,
         message: "CEP inválido"
       });
-
     }
 
     // 1. CEP
-    const endereco =
-      await viaCEP(cep);
+    const endereco = await viaCEP(cep);
 
     const query = [
       endereco.logradouro,
@@ -446,145 +382,87 @@ app.get("/api/photos/:cep", async (req, res) => {
       .join(", ");
 
     // 2. Coordenadas
-    const location =
-      await geocode(query);
+    const location = await geocode(query);
 
     if (!location) {
-
       return res.status(404).json({
         success: false,
-        message:
-          "Não foi possível localizar este endereço."
+        message: "Não foi possível localizar este endereço."
       });
-
     }
 
     // 3. Imagens
-    const imagens =
-      await searchImages(
-        location.latitude,
-        location.longitude
-      );
+    const imagens = await searchImages(
+      location.latitude,
+      location.longitude
+    );
 
     // 4. Baixar em paralelo
-    const baixadas =
-      await Promise.all(
-        imagens.slice(0, 20).map(
-          async image => {
+    const baixadas = await Promise.all(
+      imagens.slice(0, 20).map(async image => {
+        const file = await downloadImage(image.preview);
 
-            const file =
-              await downloadImage(
-                image.preview
-              );
+        if (!file) return null;
 
-            if (!file) {
-              return null;
-            }
+        return {
+          id: file.split(".")[0],
+          url: `/photos/${file}`,
+          titulo: image.title.replace("File:", ""),
+          largura: image.width,
+          altura: image.height
+        };
+      })
+    );
 
-            return {
-              id: file.split(".")[0],
-
-              url:
-                `/photos/${file}`,
-
-              titulo:
-                image.title
-                  .replace("File:", ""),
-
-              largura:
-                image.width,
-
-              altura:
-                image.height
-            };
-
-          }
-        )
-      );
-
-    const finalImages =
-      baixadas.filter(Boolean);
+    const finalImages = baixadas.filter(Boolean);
 
     // 5. Resposta
     res.json({
-
       success: true,
-
       api: "photo-fastcep",
 
       consulta: {
         cep,
-        cep_formatado:
-          `${cep.slice(0, 5)}-${cep.slice(5)}`
+        cep_formatado: `${cep.slice(0, 5)}-${cep.slice(5)}`
       },
 
       endereco: {
-
-        logradouro:
-          endereco.logradouro || null,
-
-        complemento:
-          endereco.complemento || null,
-
-        bairro:
-          endereco.bairro || null,
-
-        cidade:
-          endereco.localidade || null,
-
-        uf:
-          endereco.uf || null,
-
-        ibge:
-          endereco.ibge || null,
-
+        logradouro: endereco.logradouro || null,
+        complemento: endereco.complemento || null,
+        bairro: endereco.bairro || null,
+        cidade: endereco.localidade || null,
+        uf: endereco.uf || null,
+        ibge: endereco.ibge || null,
         completo: query
       },
 
       localizacao: {
-
-        latitude:
-          location.latitude,
-
-        longitude:
-          location.longitude
+        latitude: location.latitude,
+        longitude: location.longitude
       },
 
       imagens: finalImages,
-
-      total:
-        finalImages.length,
-
+      total: finalImages.length,
       validade: "15 minutos"
-
     });
 
   } catch (error) {
-
     console.error(error);
 
     res.status(500).json({
-
       success: false,
-
-      message:
-        error.message ||
-        "Erro interno"
-
+      message: error.message || "Erro interno"
     });
-
   }
-
 });
-
 
 // ===============================
 // START
 // ===============================
 
-app.listen(PORT, () => {
-
-  console.log(`
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`
 ╔══════════════════════════════════╗
 ║          PHOTO-FASTCEP           ║
 ║                                  ║
@@ -592,5 +470,7 @@ app.listen(PORT, () => {
 ║          PORTA ${PORT}              ║
 ╚══════════════════════════════════╝
 `);
+  });
+}
 
-});
+module.exports = app;
