@@ -1,0 +1,27 @@
+{
+  "name": "photo-fastcep",
+  "version": "1.0.0",
+  "description": "API que busca imagens do Wikimedia Commons a partir de um CEP brasileiro, usando ViaCEP e Nominatim para geocodificação.",
+  "main": "photo-fastcep.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node photo-fastcep.js",
+    "dev": "node --watch photo-fastcep.js"
+  },
+  "keywords": [
+    "cep",
+    "photos",
+    "wikimedia",
+    "nominatim",
+    "viacep",
+    "geocoding"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
